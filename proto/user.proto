@@ -1,0 +1,12 @@
+syntax = "proto3";
+package domain;
+
+option go_package="./internal/core/domain";
+
+message UserDomain {
+    string uuid = 1;
+    string username = 2;
+    string name = 3;
+    string email = 4;
+    string password = 5;
+}
