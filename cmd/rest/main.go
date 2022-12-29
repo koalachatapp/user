@@ -30,7 +30,9 @@ func main() {
 		AllowMethods: "GET,POST,PUT,PATCH,DELETE",
 	}))
 	app.Post("/register", userhandler.Post)
-	app.Delete("/:id", userhandler.Delete)
+	app.Delete("/remove/:uuid", userhandler.Delete)
+	app.Put("/update/:uuid", userhandler.Put)
+	app.Patch("/update/:uuid", userhandler.Patch)
 	app.Listen(":3030")
 
 }
