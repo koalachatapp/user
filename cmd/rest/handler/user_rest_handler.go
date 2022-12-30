@@ -2,14 +2,12 @@ package handler
 
 import (
 	"github.com/gofiber/fiber/v2"
-	"github.com/jellydator/ttlcache/v3"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
 )
 
 type RestHandler struct {
 	service port.UserService
-	cache   *ttlcache.Cache[uint8, []string]
 }
 
 func NewRestHandler(service port.UserService) *RestHandler {
@@ -25,7 +23,7 @@ func (h *RestHandler) Post(ctx *fiber.Ctx) error {
 	err := h.service.Register(*user)
 	if err != nil {
 		if err.Error() == "user already registered" {
-			return ctx.Status(405).JSON(map[string]string{"status": "error", "message": err.Error()})
+			return ctx.Status(409).JSON(map[string]string{"status": "error", "message": err.Error()})
 		}
 		return ctx.Status(400).JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
@@ -38,7 +36,7 @@ func (h *RestHandler) Delete(ctx *fiber.Ctx) error {
 	uuid := ctx.Params("uuid")
 	if err := h.service.Delete(uuid); err != nil {
 		if err.Error() == "uuid not found" {
-			return ctx.Status(405).JSON(map[string]string{"status": "error", "message": err.Error()})
+			return ctx.Status(409).JSON(map[string]string{"status": "error", "message": err.Error()})
 		}
 		return ctx.Status(400).JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
@@ -53,7 +51,7 @@ func (h *RestHandler) Put(ctx *fiber.Ctx) error {
 	ctx.BodyParser(user)
 	if err := h.service.Update(uuid, *user); err != nil {
 		if err.Error() == "uuid not found" {
-			return ctx.Status(405).JSON(map[string]string{"status": "error", "message": err.Error()})
+			return ctx.Status(409).JSON(map[string]string{"status": "error", "message": err.Error()})
 		}
 		return ctx.Status(400).JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
@@ -68,7 +66,7 @@ func (h *RestHandler) Patch(ctx *fiber.Ctx) error {
 	ctx.BodyParser(user)
 	if err := h.service.Patch(uuid, *user); err != nil {
 		if err.Error() == "uuid not found" {
-			return ctx.Status(405).JSON(map[string]string{"status": "error", "message": err.Error()})
+			return ctx.Status(409).JSON(map[string]string{"status": "error", "message": err.Error()})
 		}
 		return ctx.Status(400).JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
