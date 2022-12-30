@@ -32,7 +32,7 @@ func (h *RestHandler) Post(ctx *fiber.Ctx) error {
 	if err != nil {
 		return ctx.JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
-	return ctx.JSON(map[string]string{
+	return ctx.Status(201).JSON(map[string]string{
 		"status": "success",
 	})
 }
@@ -42,7 +42,9 @@ func (h *RestHandler) Delete(ctx *fiber.Ctx) error {
 	if err := h.service.Delete(uuid); err != nil {
 		return ctx.JSON(map[string]string{"status": "error", "message": err.Error()})
 	}
-	return ctx.JSON(map[string]string{"status": "success"})
+	return ctx.Status(201).JSON(map[string]string{
+		"status": "success",
+	})
 }
 
 func (h *RestHandler) Put(ctx *fiber.Ctx) error {

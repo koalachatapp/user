@@ -95,13 +95,18 @@ func (s *userService) Register(user entity.UserEntity) error {
 		return errors.New("user already registered")
 	}
 	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
-	user.Uuid = strings.TrimSpace(string(u))
-	s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
-	sha := sha512.New()
-	sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString([]byte(user.Uuid)) + "." + user.Password))
-	user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
+
 	s.wg.Add(1)
 	s.worker <- func() error {
+		user.Uuid = strings.TrimSpace(string(u))
+		s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
+		sha := sha512.New()
+		var reverseUuid string
+		for i := 0; i < len(user.Uuid); i++ {
+			reverseUuid = string(user.Uuid[len(user.Uuid)-i])
+		}
+		sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString([]byte(reverseUuid)) + "." + user.Password))
+		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 		return s.repository.Save(user)
 	}
 	return nil

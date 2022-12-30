@@ -61,7 +61,7 @@ func main() {
 	app.Post("/register", userhandler.Post)
 	app.Delete("/remove/:uuid", userhandler.Delete)
 	app.Put("/update/:uuid", userhandler.Put)
-	app.Patch("/update/:uuid", userhandler.Patch)
+	app.Patch("/patch/:uuid", userhandler.Patch)
 	app.Listen(":3030")
 
 }
