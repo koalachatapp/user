@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io/ioutil"
 	"log"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Shopify/sarama"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
@@ -18,17 +20,17 @@ import (
 
 type userService struct {
 	repository port.UserRepository
-	worker     chan func() error
-	wg         sync.WaitGroup
 	cache      *ttlcache.Cache[uint8, []string]
+	worker     *port.Worker
+	prod       sarama.SyncProducer
 }
 
 var storage []func() error
 
-func NewUserService(repository port.UserRepository) port.UserService {
+func NewUserService(repository port.UserRepository, worker *port.Worker) port.UserService {
 	userservice := &userService{
 		repository: repository,
-		worker:     make(chan func() error, 200),
+		worker:     worker,
 		cache:      ttlcache.New[uint8, []string](),
 	}
 	go userservice.cache.Start()
@@ -52,7 +54,7 @@ func NewUserService(repository port.UserRepository) port.UserService {
 					}
 					wg.Done()
 				}
-			}(u.worker, &u.wg)
+			}(u.worker.Worker, &u.worker.Wg)
 		}
 	}(userservice)
 	// retry mechanism
@@ -61,15 +63,26 @@ func NewUserService(repository port.UserRepository) port.UserService {
 			if len(storage) > 0 {
 				log.Printf("rerunning %d pending task..\n", len(storage))
 				for i := 0; i < len(storage); i++ {
-					u.wg.Add(1)
-					u.worker <- storage[i]
+					u.worker.Wg.Add(1)
+					u.worker.Worker <- storage[i]
 				}
 				storage = nil
 			}
 			time.Sleep(3 * time.Second)
 		}
 	}(userservice)
-	userservice.wg.Wait()
+	saramaconfig := sarama.NewConfig()
+	saramaconfig.Producer.Return.Successes = true
+	saramaconfig.Producer.Retry.Max = 0
+	saramaddr := os.Getenv("KAFKA_URL")
+	if saramaddr == "" {
+		saramaddr = "kafka:9092"
+	}
+	prod, err := sarama.NewSyncProducer([]string{saramaddr}, saramaconfig)
+	if err != nil {
+		log.Println(err)
+	}
+	userservice.prod = prod
 	return userservice
 }
 
@@ -96,8 +109,8 @@ func (s *userService) Register(user entity.UserEntity) error {
 	}
 	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
 
-	s.wg.Add(1)
-	s.worker <- func() error {
+	s.worker.Wg.Add(2)
+	s.worker.Worker <- func() error {
 		user.Uuid = strings.TrimSpace(string(u))
 		s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
 		sha := sha512.New()
@@ -108,6 +121,14 @@ func (s *userService) Register(user entity.UserEntity) error {
 		sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUuid2byte) + "." + user.Password))
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 		return s.repository.Save(user)
+	}
+	s.worker.Worker <- func() error {
+		part, off, err := s.prod.SendMessage(&sarama.ProducerMessage{
+			Topic: "Topic1",
+			Value: sarama.StringEncoder("hello"),
+		})
+		log.Printf("Sending message to Topic1 on partition %d at offset %d\n", part, off)
+		return err
 	}
 	return nil
 }
@@ -166,8 +187,8 @@ func (s *userService) Update(uuid string, user entity.UserEntity) error {
 		sha.Write([]byte(uuid + "." + base64.StdEncoding.EncodeToString([]byte(uuid)) + "." + user.Password))
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
-	s.wg.Add(1)
-	s.worker <- func() error {
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- func() error {
 		return s.repository.Update(uuid, user)
 	}
 	return nil
@@ -198,8 +219,8 @@ func (s *userService) Patch(uuid string, user entity.UserEntity) error {
 		sha.Write([]byte(uuid + "." + base64.StdEncoding.EncodeToString([]byte(uuid)) + "." + user.Password))
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
-	s.wg.Add(1)
-	s.worker <- func() error {
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- func() error {
 		return s.repository.Patch(uuid, user)
 	}
 	return nil

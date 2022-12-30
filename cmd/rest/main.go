@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -14,6 +15,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/monitor"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/koalachatapp/user/cmd/rest/handler"
+	"github.com/koalachatapp/user/internal/core/port"
 	"github.com/koalachatapp/user/internal/core/service"
 	"github.com/koalachatapp/user/internal/repository"
 )
@@ -23,8 +25,15 @@ func main() {
 	// repository
 	userrepo := repository.NewUserRepository()
 
+	// worker
+	worker := port.Worker{
+		Wg:     sync.WaitGroup{},
+		Worker: make(chan func() error),
+	}
+	defer worker.Wg.Wait()
+
 	// service
-	userservice := service.NewUserService(userrepo)
+	userservice := service.NewUserService(userrepo, &worker)
 
 	// handler
 	userhandler := handler.NewRestHandler(userservice)
