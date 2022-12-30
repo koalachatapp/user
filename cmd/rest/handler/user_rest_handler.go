@@ -2,12 +2,14 @@ package handler
 
 import (
 	"github.com/gofiber/fiber/v2"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
 )
 
 type RestHandler struct {
 	service port.UserService
+	cache   *ttlcache.Cache[uint8, []string]
 }
 
 func NewRestHandler(service port.UserService) *RestHandler {

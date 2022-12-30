@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha512"
+	"encoding/base64"
 	"errors"
 	"io/ioutil"
 	"log"
@@ -9,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
 )
@@ -17,6 +20,7 @@ type userService struct {
 	repository port.UserRepository
 	worker     chan func() error
 	wg         sync.WaitGroup
+	cache      *ttlcache.Cache[uint8, []string]
 }
 
 var storage []func() error
@@ -25,7 +29,17 @@ func NewUserService(repository port.UserRepository) port.UserService {
 	userservice := &userService{
 		repository: repository,
 		worker:     make(chan func() error, 200),
+		cache:      ttlcache.New[uint8, []string](),
 	}
+	go userservice.cache.Start()
+	userservice.cache.Set(0, []string{}, ttlcache.NoTTL)
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			userservice.cache.DeleteAll()
+			userservice.cache.Set(0, []string{}, ttlcache.NoTTL)
+		}
+	}()
 	// worker
 	go func(u *userService) {
 		for i := 0; i < 10; i++ {
@@ -71,8 +85,6 @@ func (s *userService) Register(user entity.UserEntity) error {
 	if !validateEmail(user.Email) {
 		return errors.New("invalid email address")
 	}
-	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
-	user.Uuid = strings.TrimSpace(string(u))
 
 	exist, err := s.repository.IsExist(user.Username, user.Email)
 	if err != nil {
@@ -82,6 +94,12 @@ func (s *userService) Register(user entity.UserEntity) error {
 	if exist {
 		return errors.New("user already registered")
 	}
+	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
+	user.Uuid = strings.TrimSpace(string(u))
+	s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
+	sha := sha512.New()
+	sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString([]byte(user.Uuid)) + "." + user.Password))
+	user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	s.wg.Add(1)
 	s.worker <- func() error {
 		return s.repository.Save(user)
@@ -95,6 +113,9 @@ func (s *userService) Delete(uuid string) error {
 	); err != nil {
 		return err
 	}
+	if _, err := s.checkUuid(uuid); err != nil {
+		return err
+	}
 	success, err := s.repository.Delete(uuid)
 	if !success {
 		if err != nil {
@@ -103,6 +124,15 @@ func (s *userService) Delete(uuid string) error {
 		}
 		return errors.New("uuid not found")
 	}
+	cur := s.cache.Get(0).Value()
+	for k, v := range cur {
+		if v == uuid {
+			cur[k] = cur[len(cur)-1]
+			cur = cur[:len(cur)-1]
+			break
+		}
+	}
+	s.cache.Set(0, cur, ttlcache.NoTTL)
 	return nil
 }
 
@@ -119,13 +149,17 @@ func (s *userService) Update(uuid string, user entity.UserEntity) error {
 	if !validateEmail(user.Email) {
 		return errors.New("invalid email address")
 	}
-	exist, err := s.repository.IsExistUuid(uuid)
-	if !exist {
-		if err != nil {
-			log.Println(err)
-			return errors.New("failed update user")
-		}
-		return errors.New("uuid not found")
+	cached, err := s.checkUuid(uuid)
+	if err != nil {
+		return err
+	}
+	if !cached {
+		s.cache.Set(0, append(s.cache.Get(0).Value(), uuid), ttlcache.NoTTL)
+	}
+	if user.Password != "" {
+		sha := sha512.New()
+		sha.Write([]byte(uuid + "." + base64.StdEncoding.EncodeToString([]byte(uuid)) + "." + user.Password))
+		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
 	s.wg.Add(1)
 	s.worker <- func() error {
@@ -141,13 +175,23 @@ func (s *userService) Patch(uuid string, user entity.UserEntity) error {
 	if user.Email == "" && user.Name == "" && user.Password == "" && user.Username == "" {
 		return errors.New("at least one data must be changed")
 	}
-	exist, err := s.repository.IsExistUuid(uuid)
-	if !exist {
-		if err != nil {
-			log.Println(err)
-			return errors.New("failed update user")
+	if user.Email != "" {
+		if !validateEmail(user.Email) {
+			return errors.New("invalid email address")
 		}
-		return errors.New("uuid not found")
+	}
+	cached, err := s.checkUuid(uuid)
+	if err != nil {
+		return err
+	}
+	if !cached {
+		s.cache.Set(0, append(s.cache.Get(0).Value(), uuid), ttlcache.NoTTL)
+	}
+
+	if user.Password != "" {
+		sha := sha512.New()
+		sha.Write([]byte(uuid + "." + base64.StdEncoding.EncodeToString([]byte(uuid)) + "." + user.Password))
+		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
 	s.wg.Add(1)
 	s.worker <- func() error {
@@ -173,4 +217,25 @@ func validateNotEmpty(param ...[2]string) error {
 func validateEmail(email string) bool {
 	emailRegex := regexp.MustCompile(`^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,4}$`)
 	return emailRegex.MatchString(email)
+}
+
+func (s *userService) checkUuid(uuid string) (bool, error) {
+	found := false
+	for _, v := range s.cache.Get(0).Value() {
+		if v == uuid {
+			found = true
+			return true, nil
+		}
+	}
+	if !found {
+		exist, err := s.repository.IsExistUuid(uuid)
+		if !exist {
+			if err != nil {
+				log.Println(err)
+				return false, errors.New("failed delete user")
+			}
+			return false, errors.New("uuid not found")
+		}
+	}
+	return false, nil
 }
