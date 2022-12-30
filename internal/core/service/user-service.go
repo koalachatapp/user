@@ -101,11 +101,11 @@ func (s *userService) Register(user entity.UserEntity) error {
 		user.Uuid = strings.TrimSpace(string(u))
 		s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
 		sha := sha512.New()
-		var reverseUuid string
-		for i := 0; i < len(user.Uuid); i++ {
-			reverseUuid = string(user.Uuid[len(user.Uuid)-i])
+		var reverseUuid2byte []byte
+		for i := len([]rune(user.Uuid)) - 1; i == 0; i-- {
+			reverseUuid2byte = append(reverseUuid2byte, user.Uuid[i])
 		}
-		sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString([]byte(reverseUuid)) + "." + user.Password))
+		sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUuid2byte) + "." + user.Password))
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 		return s.repository.Save(user)
 	}
