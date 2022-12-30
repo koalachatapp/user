@@ -55,6 +55,18 @@ func main() {
 			return c.JSON(map[string]string{"status": "error", "message": "too fast"})
 		},
 	}))
+	app.Use("/", func(ctx *fiber.Ctx) error {
+		head := ctx.GetReqHeaders()
+		if head["Token"] == "" {
+			return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Not Authorized"})
+		}
+		// FUTURE: call from auth server for validate token
+		if head["Token"] != "koala" {
+			return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Invalid Authorization"})
+		}
+
+		return ctx.Next()
+	})
 	if os.Getenv("ENV") == "dev" {
 		app.Get("/monitor", monitor.New(monitor.Config{Refresh: 1 * time.Second}))
 	}
