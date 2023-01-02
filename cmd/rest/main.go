@@ -2,11 +2,13 @@ package main
 
 import (
 	"log"
+	"math/rand"
 	"os"
 	"runtime"
 	"sync"
 	"time"
 
+	"github.com/Shopify/sarama"
 	"github.com/bytedance/sonic"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -22,15 +24,42 @@ import (
 
 func main() {
 	runtime.GOMAXPROCS(2)
+	rand.Seed(time.Now().Unix())
 	// repository
 	userrepo := repository.NewUserRepository()
 
+	saramaconfig := sarama.NewConfig()
+	saramaconfig.Producer.Return.Successes = false
+	saramaconfig.Producer.Transaction.ID = "usersearch"
+	saramaconfig.Producer.Idempotent = true
+	saramaconfig.Producer.Retry.Max = 10
+	saramaconfig.Producer.RequiredAcks = sarama.WaitForAll
+	saramaconfig.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+	saramaconfig.Producer.Transaction.Retry.Backoff = 10
+	saramaconfig.Net.MaxOpenRequests = 1
+	saramaddr := os.Getenv("KAFKA_URL")
+	if saramaddr == "" {
+		saramaddr = "kafka:9092"
+	}
+	prod, err := sarama.NewAsyncProducer([]string{saramaddr}, saramaconfig)
+	if err != nil {
+		log.Println(err)
+	} else {
+		defer prod.AsyncClose()
+	}
+
 	// worker
 	worker := port.Worker{
-		Wg:     sync.WaitGroup{},
-		Worker: make(chan func() error),
+		Wg:         sync.WaitGroup{},
+		Wg2:        sync.WaitGroup{},
+		Worker:     make(chan map[uint8]interface{}),
+		Prod:       &prod,
+		Lock:       sync.Mutex{},
+		Send2kafka: make(chan string, 256),
 	}
 	defer worker.Wg.Wait()
+	defer worker.Wg2.Wait()
+	// go worker.RunProduserWorker()
 
 	// service
 	userservice := service.NewUserService(userrepo, &worker)
@@ -64,18 +93,10 @@ func main() {
 			return c.JSON(map[string]string{"status": "error", "message": "too fast"})
 		},
 	}))
-	app.Use("/", func(ctx *fiber.Ctx) error {
-		head := ctx.GetReqHeaders()
-		if head["Token"] == "" {
-			return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Not Authorized"})
-		}
-		// FUTURE: call from auth server for validate token
-		if head["Token"] != "koala" {
-			return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Invalid Authorization"})
-		}
-
-		return ctx.Next()
-	})
+	app.Use("/register", userhandler.TokenValidate)
+	app.Use("/remove", userhandler.TokenValidate)
+	app.Use("/update", userhandler.TokenValidate)
+	app.Use("/patch", userhandler.TokenValidate)
 	if os.Getenv("ENV") == "dev" {
 		app.Get("/monitor", monitor.New(monitor.Config{Refresh: 1 * time.Second}))
 	}

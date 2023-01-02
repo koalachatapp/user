@@ -1,56 +1,112 @@
 package service
 
 import (
+	"context"
 	"crypto/sha512"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
-	"github.com/jellydator/ttlcache/v3"
+	"github.com/bytedance/sonic"
+	"github.com/go-redis/redis/v9"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
 )
 
 type userService struct {
 	repository port.UserRepository
-	cache      *ttlcache.Cache[uint8, []string]
 	worker     *port.Worker
-	prod       sarama.SyncProducer
+	prod       sarama.AsyncProducer
+	redis      *redis.Client
 }
 
 var storage []func() error
 
+// NewUserService creates a new user service
 func NewUserService(repository port.UserRepository, worker *port.Worker) port.UserService {
 	userservice := &userService{
 		repository: repository,
 		worker:     worker,
-		cache:      ttlcache.New[uint8, []string](),
 	}
-	go userservice.cache.Start()
-	userservice.cache.Set(0, []string{}, ttlcache.NoTTL)
-	go func() {
-		for {
-			time.Sleep(10 * time.Minute)
-			userservice.cache.DeleteAll()
-			userservice.cache.Set(0, []string{}, ttlcache.NoTTL)
-		}
-	}()
+	userservice.redis = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+
 	// worker
 	go func(u *userService) {
 		for i := 0; i < 10; i++ {
-			go func(msg <-chan func() error, wg *sync.WaitGroup) {
-				for m := range msg {
-					err := m()
-					if err != nil {
-						log.Println(err)
-						storage = append(storage, m)
+			go func(msg <-chan map[uint8]interface{}, wg *sync.WaitGroup) {
+				for msg := range msg {
+					for k, v := range msg {
+						switch k {
+						case 0:
+							err := v.(func() error)()
+							if err != nil {
+								log.Println(err)
+								storage = append(storage, v.(func() error))
+							}
+						case 1:
+							log.Println("Sending to Kafka : ", fmt.Sprintf("%s", v))
+							err := (*u.worker.Prod).BeginTxn()
+							if err != nil {
+								log.Println(err)
+							}
+							// if (*w.Prod).IsTransactional() {
+							// 	log.Println("transaction is on progress")
+							// 	continue
+							// }
+							var suc int = 0
+							select {
+							case (*u.worker.Prod).Input() <- &sarama.ProducerMessage{
+								Topic: "UsersearchTopic",
+								Value: sarama.StringEncoder(fmt.Sprintf("%s", v)),
+							}:
+								suc++
+							case err := <-(*u.worker.Prod).Errors():
+								log.Println(err.Err)
+							}
+							if err := (*u.worker.Prod).CommitTxn(); err != nil {
+								log.Printf("Producer: unable to commit txn %s\n", err)
+								for {
+									if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagFatalError != 0 {
+										// fatal error. need to recreate producer.
+										log.Printf("Producer: producer is in a fatal state, need to recreate it")
+										break
+									}
+									// If producer is in abortable state, try to abort current transaction.
+									if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagAbortableError != 0 {
+										err = (*u.worker.Prod).AbortTxn()
+										if err != nil {
+											// If an error occured just retry it.
+											log.Printf("Producer: unable to abort transaction: %+v", err)
+											continue
+										}
+										break
+									}
+									// if not you can retry
+									err = (*u.worker.Prod).CommitTxn()
+									if err != nil {
+										log.Printf("Producer: unable to commit txn %s\n", err)
+										continue
+									}
+								}
+							}
+							if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagInError != 0 {
+								// Try to close it
+								_ = (*u.worker.Prod).Close()
+								return
+							}
+							log.Println("data sended to kafka ", suc)
+						}
 					}
 					wg.Done()
 				}
@@ -64,25 +120,16 @@ func NewUserService(repository port.UserRepository, worker *port.Worker) port.Us
 				log.Printf("rerunning %d pending task..\n", len(storage))
 				for i := 0; i < len(storage); i++ {
 					u.worker.Wg.Add(1)
-					u.worker.Worker <- storage[i]
+					u.worker.Worker <- map[uint8]interface{}{
+						0: storage[i],
+					}
 				}
 				storage = nil
 			}
 			time.Sleep(3 * time.Second)
 		}
 	}(userservice)
-	saramaconfig := sarama.NewConfig()
-	saramaconfig.Producer.Return.Successes = true
-	saramaconfig.Producer.Retry.Max = 0
-	saramaddr := os.Getenv("KAFKA_URL")
-	if saramaddr == "" {
-		saramaddr = "kafka:9092"
-	}
-	prod, err := sarama.NewSyncProducer([]string{saramaddr}, saramaconfig)
-	if err != nil {
-		log.Println(err)
-	}
-	userservice.prod = prod
+
 	return userservice
 }
 
@@ -95,7 +142,11 @@ func (s *userService) Register(user entity.UserEntity) error {
 	); err != nil {
 		return err
 	}
-	if !validateEmail(user.Email) {
+	isvalid := make(chan bool, 5)
+	go func() {
+		isvalid <- validateEmail(user.Email)
+	}()
+	if !<-isvalid {
 		return errors.New("invalid email address")
 	}
 
@@ -109,27 +160,41 @@ func (s *userService) Register(user entity.UserEntity) error {
 	}
 	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
 
-	s.worker.Wg.Add(2)
-	s.worker.Worker <- func() error {
-		user.Uuid = strings.TrimSpace(string(u))
-		s.cache.Set(0, append(s.cache.Get(0).Value(), user.Uuid), ttlcache.NoTTL)
-		sha := sha512.New()
-		var reverseUuid2byte []byte
-		for i := len([]rune(user.Uuid)) - 1; i == 0; i-- {
-			reverseUuid2byte = append(reverseUuid2byte, user.Uuid[i])
-		}
-		sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUuid2byte) + "." + user.Password))
-		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
-		return s.repository.Save(user)
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- map[uint8]interface{}{
+		0: func() error {
+			user.Uuid = strings.TrimSpace(string(u))
+			b, err := sonic.Marshal(&user)
+			if err != nil {
+				return err
+			}
+			success, err := s.redis.SetNX(context.Background(), user.Uuid, b, 1*time.Minute).Result()
+			if err != nil {
+				return err
+			}
+			if success {
+				log.Println("chaching on redis")
+			}
+			sha := sha512.New()
+			var reverseUUID2byte []byte
+			for i := len([]rune(user.Uuid)) - 1; i == 0; i-- {
+				reverseUUID2byte = append(reverseUUID2byte, user.Uuid[i])
+			}
+			sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUUID2byte) + "." + user.Password))
+			user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
+			return s.repository.Save(user)
+		},
 	}
-	s.worker.Worker <- func() error {
-		part, off, err := s.prod.SendMessage(&sarama.ProducerMessage{
-			Topic: "Topic1",
-			Value: sarama.StringEncoder("hello"),
-		})
-		log.Printf("Sending message to Topic1 on partition %d at offset %d\n", part, off)
+	json, _ := sonic.Marshal(&user)
+	if err != nil {
 		return err
 	}
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- map[uint8]interface{}{
+		1: json,
+	}
+	// s.worker.Wg2.Add(1)
+	// s.worker.Send2kafka <- string(json)
 	return nil
 }
 
@@ -142,6 +207,11 @@ func (s *userService) Delete(uuid string) error {
 	if _, err := s.checkUuid(uuid); err != nil {
 		return err
 	}
+	res, err := s.redis.Del(context.TODO(), uuid).Result()
+	if err != nil {
+		return err
+	}
+	log.Println(res)
 	success, err := s.repository.Delete(uuid)
 	if !success {
 		if err != nil {
@@ -150,15 +220,7 @@ func (s *userService) Delete(uuid string) error {
 		}
 		return errors.New("uuid not found")
 	}
-	cur := s.cache.Get(0).Value()
-	for k, v := range cur {
-		if v == uuid {
-			cur[k] = cur[len(cur)-1]
-			cur = cur[:len(cur)-1]
-			break
-		}
-	}
-	s.cache.Set(0, cur, ttlcache.NoTTL)
+
 	return nil
 }
 
@@ -180,7 +242,13 @@ func (s *userService) Update(uuid string, user entity.UserEntity) error {
 		return err
 	}
 	if !cached {
-		s.cache.Set(0, append(s.cache.Get(0).Value(), uuid), ttlcache.NoTTL)
+		b, err := sonic.Marshal(&user)
+		if err != nil {
+			return err
+		} else {
+			s.redis.SetNX(context.Background(), uuid, b, 2*time.Minute)
+			log.Printf("chacing uuid on redis [%s]\n", uuid)
+		}
 	}
 	if user.Password != "" {
 		sha := sha512.New()
@@ -188,8 +256,10 @@ func (s *userService) Update(uuid string, user entity.UserEntity) error {
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
 	s.worker.Wg.Add(1)
-	s.worker.Worker <- func() error {
-		return s.repository.Update(uuid, user)
+	s.worker.Worker <- map[uint8]interface{}{
+		0: func() error {
+			return s.repository.Update(uuid, user)
+		},
 	}
 	return nil
 }
@@ -211,7 +281,13 @@ func (s *userService) Patch(uuid string, user entity.UserEntity) error {
 		return err
 	}
 	if !cached {
-		s.cache.Set(0, append(s.cache.Get(0).Value(), uuid), ttlcache.NoTTL)
+		b, err := sonic.Marshal(&user)
+		if err != nil {
+			return err
+		} else {
+			s.redis.SetNX(context.Background(), uuid, b, 2*time.Minute)
+			log.Printf("chacing uuid on redis [%s]\n", uuid)
+		}
 	}
 
 	if user.Password != "" {
@@ -220,8 +296,10 @@ func (s *userService) Patch(uuid string, user entity.UserEntity) error {
 		user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 	}
 	s.worker.Wg.Add(1)
-	s.worker.Worker <- func() error {
-		return s.repository.Patch(uuid, user)
+	s.worker.Worker <- map[uint8]interface{}{
+		0: func() error {
+			return s.repository.Patch(uuid, user)
+		},
 	}
 	return nil
 }
@@ -246,22 +324,20 @@ func validateEmail(email string) bool {
 }
 
 func (s *userService) checkUuid(uuid string) (bool, error) {
-	found := false
-	for _, v := range s.cache.Get(0).Value() {
-		if v == uuid {
-			found = true
-			return true, nil
-		}
+	data, err := s.redis.Get(context.TODO(), uuid).Result()
+	if err == nil && data != "" {
+		log.Println("uuid found on redis")
+		return true, nil
 	}
-	if !found {
-		exist, err := s.repository.IsExistUuid(uuid)
-		if !exist {
-			if err != nil {
-				log.Println(err)
-				return false, errors.New("failed delete user")
-			}
-			return false, errors.New("uuid not found")
+
+	exist, err := s.repository.IsExistUuid(uuid)
+	if !exist {
+		if err != nil {
+			log.Println(err)
+			return false, errors.New("failed delete user")
 		}
+		return false, errors.New("uuid not found")
 	}
+
 	return false, nil
 }

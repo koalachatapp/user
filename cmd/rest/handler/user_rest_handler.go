@@ -74,3 +74,16 @@ func (h *RestHandler) Patch(ctx *fiber.Ctx) error {
 		"status": "success",
 	})
 }
+
+func (h *RestHandler) TokenValidate(ctx *fiber.Ctx) error {
+	head := ctx.GetReqHeaders()
+	if head["Token"] == "" {
+		return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Not Authorized"})
+	}
+	// FUTURE: call from auth server for validate token
+	if head["Token"] != "koala" {
+		return ctx.Status(401).JSON(map[string]string{"status": "error", "message": "Invalid Authorization"})
+	}
+
+	return ctx.Next()
+}
