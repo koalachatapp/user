@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"regexp"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/Shopify/sarama"
 	"github.com/bytedance/sonic"
 	"github.com/go-redis/redis/v9"
+	"github.com/google/uuid"
 	"github.com/koalachatapp/user/internal/core/entity"
 	"github.com/koalachatapp/user/internal/core/port"
 )
@@ -56,56 +56,10 @@ func NewUserService(repository port.UserRepository, worker *port.Worker) port.Us
 							}
 						case 1:
 							log.Println("Sending to Kafka : ", fmt.Sprintf("%s", v))
-							err := (*u.worker.Prod).BeginTxn()
-							if err != nil {
-								log.Println(err)
-							}
-							// if (*w.Prod).IsTransactional() {
-							// 	log.Println("transaction is on progress")
-							// 	continue
-							// }
-							var suc int = 0
-							select {
-							case (*u.worker.Prod).Input() <- &sarama.ProducerMessage{
+							(u.worker.Prod).SendMessage(&sarama.ProducerMessage{
 								Topic: "UsersearchTopic",
 								Value: sarama.StringEncoder(fmt.Sprintf("%s", v)),
-							}:
-								suc++
-							case err := <-(*u.worker.Prod).Errors():
-								log.Println(err.Err)
-							}
-							if err := (*u.worker.Prod).CommitTxn(); err != nil {
-								log.Printf("Producer: unable to commit txn %s\n", err)
-								for {
-									if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagFatalError != 0 {
-										// fatal error. need to recreate producer.
-										log.Printf("Producer: producer is in a fatal state, need to recreate it")
-										break
-									}
-									// If producer is in abortable state, try to abort current transaction.
-									if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagAbortableError != 0 {
-										err = (*u.worker.Prod).AbortTxn()
-										if err != nil {
-											// If an error occured just retry it.
-											log.Printf("Producer: unable to abort transaction: %+v", err)
-											continue
-										}
-										break
-									}
-									// if not you can retry
-									err = (*u.worker.Prod).CommitTxn()
-									if err != nil {
-										log.Printf("Producer: unable to commit txn %s\n", err)
-										continue
-									}
-								}
-							}
-							if (*u.worker.Prod).TxnStatus()&sarama.ProducerTxnFlagInError != 0 {
-								// Try to close it
-								_ = (*u.worker.Prod).Close()
-								return
-							}
-							log.Println("data sended to kafka ", suc)
+							})
 						}
 					}
 					wg.Done()
@@ -158,12 +112,12 @@ func (s *userService) Register(user entity.UserEntity) error {
 	if exist {
 		return errors.New("user already registered")
 	}
-	u, _ := ioutil.ReadFile("/proc/sys/kernel/random/uuid")
+	u := uuid.New().String()
+	user.Uuid = strings.TrimSpace(string(u))
 
 	s.worker.Wg.Add(1)
 	s.worker.Worker <- map[uint8]interface{}{
 		0: func() error {
-			user.Uuid = strings.TrimSpace(string(u))
 			b, err := sonic.Marshal(&user)
 			if err != nil {
 				return err
@@ -185,7 +139,11 @@ func (s *userService) Register(user entity.UserEntity) error {
 			return s.repository.Save(user)
 		},
 	}
-	json, _ := sonic.Marshal(&user)
+	data := entity.UserEventEntity{
+		Method: "register",
+		Data:   user,
+	}
+	json, _ := sonic.Marshal(&data)
 	if err != nil {
 		return err
 	}
@@ -193,8 +151,6 @@ func (s *userService) Register(user entity.UserEntity) error {
 	s.worker.Worker <- map[uint8]interface{}{
 		1: json,
 	}
-	// s.worker.Wg2.Add(1)
-	// s.worker.Send2kafka <- string(json)
 	return nil
 }
 

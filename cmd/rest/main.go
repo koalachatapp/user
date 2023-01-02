@@ -29,23 +29,25 @@ func main() {
 	userrepo := repository.NewUserRepository()
 
 	saramaconfig := sarama.NewConfig()
-	saramaconfig.Producer.Return.Successes = false
-	saramaconfig.Producer.Transaction.ID = "usersearch"
-	saramaconfig.Producer.Idempotent = true
-	saramaconfig.Producer.Retry.Max = 10
-	saramaconfig.Producer.RequiredAcks = sarama.WaitForAll
-	saramaconfig.Producer.Partitioner = sarama.NewRoundRobinPartitioner
-	saramaconfig.Producer.Transaction.Retry.Backoff = 10
-	saramaconfig.Net.MaxOpenRequests = 1
+	saramaconfig.Producer.Return.Successes = true
+	// saramaconfig.Producer.Transaction.ID = "usersearch12"
+	// saramaconfig.Producer.Idempotent = true
+	// saramaconfig.Producer.Retry.Max = 10
+	// saramaconfig.Producer.Timeout = 2
+	// saramaconfig.Producer.Return.Errors = true
+	// saramaconfig.Producer.RequiredAcks = sarama.WaitForAll
+	// saramaconfig.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+	// saramaconfig.Producer.Transaction.Retry.Backoff = time.Hour
+	saramaconfig.Net.MaxOpenRequests = 5
 	saramaddr := os.Getenv("KAFKA_URL")
 	if saramaddr == "" {
 		saramaddr = "kafka:9092"
 	}
-	prod, err := sarama.NewAsyncProducer([]string{saramaddr}, saramaconfig)
+	prod, err := sarama.NewSyncProducer([]string{saramaddr}, saramaconfig)
 	if err != nil {
 		log.Println(err)
 	} else {
-		defer prod.AsyncClose()
+		defer prod.Close()
 	}
 
 	// worker
@@ -53,7 +55,7 @@ func main() {
 		Wg:         sync.WaitGroup{},
 		Wg2:        sync.WaitGroup{},
 		Worker:     make(chan map[uint8]interface{}),
-		Prod:       &prod,
+		Prod:       prod,
 		Lock:       sync.Mutex{},
 		Send2kafka: make(chan string, 256),
 	}
