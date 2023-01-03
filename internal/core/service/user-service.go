@@ -87,34 +87,41 @@ func NewUserService(repository port.UserRepository, worker *port.Worker) port.Us
 	return userservice
 }
 
-func (s *userService) Register(user entity.UserEntity) error {
+func (s *userService) Register(user entity.UserEntity) (string, error) {
 	if err := validateNotEmpty(
 		[2]string{"username", user.Username},
 		[2]string{"password", user.Password},
 		[2]string{"email", user.Email},
 		[2]string{"name", user.Name},
 	); err != nil {
-		return err
+		return "", err
 	}
 	isvalid := make(chan bool, 5)
 	go func() {
 		isvalid <- validateEmail(user.Email)
 	}()
 	if !<-isvalid {
-		return errors.New("invalid email address")
+		return "", errors.New("invalid email address")
 	}
-
-	exist, err := s.repository.IsExist(user.Username, user.Email)
-	if err != nil {
-		log.Println(err)
-		return errors.New("failed connect to DB")
+	email := s.redis.Get(context.TODO(), user.Email)
+	username := s.redis.Get(context.TODO(), user.Username)
+	if email.Err() != nil || username.Err() != nil {
+		exist, err := s.repository.IsExist(user.Username, user.Email)
+		if err != nil {
+			log.Println(err)
+			return "", errors.New("failed connect to DB")
+		}
+		if exist {
+			return "", errors.New("user already registered")
+		}
+		u := uuid.New().String()
+		user.Uuid = strings.TrimSpace(string(u))
+		s.redis.SetNX(context.Background(), user.Email, true, time.Minute)
+		s.redis.SetNX(context.Background(), user.Username, true, time.Minute)
 	}
-	if exist {
-		return errors.New("user already registered")
+	if email.Val() != "" || username.Val() != "" {
+		return "", errors.New("user already registered")
 	}
-	u := uuid.New().String()
-	user.Uuid = strings.TrimSpace(string(u))
-
 	s.worker.Wg.Add(1)
 	s.worker.Worker <- map[uint8]interface{}{
 		0: func() error {
@@ -143,15 +150,15 @@ func (s *userService) Register(user entity.UserEntity) error {
 		Method: "register",
 		Data:   user,
 	}
-	json, _ := sonic.Marshal(&data)
+	json, err := sonic.Marshal(&data)
 	if err != nil {
-		return err
+		return "", err
 	}
 	s.worker.Wg.Add(1)
 	s.worker.Worker <- map[uint8]interface{}{
 		1: json,
 	}
-	return nil
+	return user.Uuid, nil
 }
 
 func (s *userService) Delete(uuid string) error {
@@ -176,7 +183,21 @@ func (s *userService) Delete(uuid string) error {
 		}
 		return errors.New("uuid not found")
 	}
-
+	var user entity.UserEntity = entity.UserEntity{
+		Uuid: uuid,
+	}
+	data := entity.UserEventEntity{
+		Method: "delete",
+		Data:   user,
+	}
+	json, _ := sonic.Marshal(&data)
+	if err != nil {
+		return err
+	}
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- map[uint8]interface{}{
+		1: json,
+	}
 	return nil
 }
 
@@ -217,6 +238,19 @@ func (s *userService) Update(uuid string, user entity.UserEntity) error {
 			return s.repository.Update(uuid, user)
 		},
 	}
+	user.Uuid = uuid
+	data := entity.UserEventEntity{
+		Method: "update",
+		Data:   user,
+	}
+	json, _ := sonic.Marshal(&data)
+	if err != nil {
+		return err
+	}
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- map[uint8]interface{}{
+		1: json,
+	}
 	return nil
 }
 
@@ -256,6 +290,19 @@ func (s *userService) Patch(uuid string, user entity.UserEntity) error {
 		0: func() error {
 			return s.repository.Patch(uuid, user)
 		},
+	}
+	user.Uuid = uuid
+	data := entity.UserEventEntity{
+		Method: "patch",
+		Data:   user,
+	}
+	json, _ := sonic.Marshal(&data)
+	if err != nil {
+		return err
+	}
+	s.worker.Wg.Add(1)
+	s.worker.Worker <- map[uint8]interface{}{
+		1: json,
 	}
 	return nil
 }

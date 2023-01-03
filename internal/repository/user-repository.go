@@ -73,16 +73,21 @@ func (u *userRepository) Patch(uuid string, user entity.UserEntity) error {
 	if user.Username != "" {
 		u.db.Model(users).Where("uuid=?", uuid).UpdateColumn("username", user.Username)
 	}
-	if err := func(param ...string) error {
+	if err := func(param ...[2]string) error {
 		for _, param := range param {
-			if param != "" {
-				if tx := u.db.Model(users).Where("uuid=?", uuid).Updates(user); tx.Error != nil {
+			if param[0] != "" && param[1] != "" {
+				if tx := u.db.Model(users).Where("uuid=? and "+param[0]+"=?", uuid, param[1]).Update(param[0], param[1]); tx.Error != nil {
 					return tx.Error
 				}
 			}
 		}
 		return nil
-	}(user.Email, user.Name, user.Password, user.Username); err != nil {
+	}(
+		[2]string{"email", user.Email},
+		[2]string{"name", user.Name},
+		[2]string{"password", user.Password},
+		[2]string{"username", user.Username},
+	); err != nil {
 		return err
 	}
 	return nil

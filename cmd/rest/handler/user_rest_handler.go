@@ -20,7 +20,7 @@ func (h *RestHandler) Post(ctx *fiber.Ctx) error {
 	user := &entity.UserEntity{}
 	ctx.BodyParser(user)
 
-	err := h.service.Register(*user)
+	uuid, err := h.service.Register(*user)
 	if err != nil {
 		if err.Error() == "user already registered" {
 			return ctx.Status(409).JSON(map[string]string{"status": "error", "message": err.Error()})
@@ -29,6 +29,7 @@ func (h *RestHandler) Post(ctx *fiber.Ctx) error {
 	}
 	return ctx.Status(201).JSON(map[string]string{
 		"status": "success",
+		"UUID":   uuid,
 	})
 }
 

@@ -30,14 +30,6 @@ func main() {
 
 	saramaconfig := sarama.NewConfig()
 	saramaconfig.Producer.Return.Successes = true
-	// saramaconfig.Producer.Transaction.ID = "usersearch12"
-	// saramaconfig.Producer.Idempotent = true
-	// saramaconfig.Producer.Retry.Max = 10
-	// saramaconfig.Producer.Timeout = 2
-	// saramaconfig.Producer.Return.Errors = true
-	// saramaconfig.Producer.RequiredAcks = sarama.WaitForAll
-	// saramaconfig.Producer.Partitioner = sarama.NewRoundRobinPartitioner
-	// saramaconfig.Producer.Transaction.Retry.Backoff = time.Hour
 	saramaconfig.Net.MaxOpenRequests = 5
 	saramaddr := os.Getenv("KAFKA_URL")
 	if saramaddr == "" {
