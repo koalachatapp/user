@@ -125,6 +125,13 @@ func (s *userService) Register(user entity.UserEntity) (string, error) {
 	s.worker.Wg.Add(1)
 	s.worker.Worker <- map[uint8]interface{}{
 		0: func() error {
+			sha := sha512.New()
+			var reverseUUID2byte []byte
+			for i := len([]rune(user.Uuid)) - 1; i == 0; i-- {
+				reverseUUID2byte = append(reverseUUID2byte, user.Uuid[i])
+			}
+			sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUUID2byte) + "." + user.Password))
+			user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
 			b, err := sonic.Marshal(&user)
 			if err != nil {
 				return err
@@ -136,28 +143,22 @@ func (s *userService) Register(user entity.UserEntity) (string, error) {
 			if success {
 				log.Println("chaching on redis")
 			}
-			sha := sha512.New()
-			var reverseUUID2byte []byte
-			for i := len([]rune(user.Uuid)) - 1; i == 0; i-- {
-				reverseUUID2byte = append(reverseUUID2byte, user.Uuid[i])
+			data := entity.UserEventEntity{
+				Method: "register",
+				Data:   user,
 			}
-			sha.Write([]byte(user.Uuid + "." + base64.StdEncoding.EncodeToString(reverseUUID2byte) + "." + user.Password))
-			user.Password = base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
+			json, err := sonic.Marshal(&data)
+			if err != nil {
+				return err
+			}
+			s.worker.Wg.Add(1)
+			s.worker.Worker <- map[uint8]interface{}{
+				1: json,
+			}
 			return s.repository.Save(user)
 		},
 	}
-	data := entity.UserEventEntity{
-		Method: "register",
-		Data:   user,
-	}
-	json, err := sonic.Marshal(&data)
-	if err != nil {
-		return "", err
-	}
-	s.worker.Wg.Add(1)
-	s.worker.Worker <- map[uint8]interface{}{
-		1: json,
-	}
+
 	return user.Uuid, nil
 }
 
