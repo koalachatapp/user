@@ -98,6 +98,11 @@ func main() {
 	app.Delete("/remove/:uuid", userhandler.Delete)
 	app.Put("/update/:uuid", userhandler.Put)
 	app.Patch("/patch/:uuid", userhandler.Patch)
-	app.Listen(":3030")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+	app.Listen(":" + port)
 
 }

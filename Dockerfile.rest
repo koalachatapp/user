@@ -2,5 +2,4 @@ FROM busybox
 RUN mkdir /app
 WORKDIR /app
 COPY . /app
-EXPOSE 3030
 CMD [ "./user-rest" ]
